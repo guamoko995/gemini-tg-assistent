@@ -14,6 +14,7 @@ pub enum Role {
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
+    pub user: String,
     pub content: String,
 }
 

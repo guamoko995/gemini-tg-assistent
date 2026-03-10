@@ -8,6 +8,7 @@ pub async fn upsert_message<'a, A>(
     chat_id: i64,
     tg_message_id: i64,
     role: Role,
+    from: &str,
     content: &str,
 ) -> Result<(), sqlx::Error>
 where
@@ -23,13 +24,14 @@ where
 
     // Вставляем или обновляем сообщение
     sqlx::query(
-        "INSERT INTO messages (chat_id, tg_message_id, role, content) \
-         VALUES (?, ?, ?, ?) \
+        "INSERT INTO messages (chat_id, tg_message_id, role, user, content) \
+         VALUES (?, ?, ?, ?, ?) \
          ON CONFLICT(chat_id, tg_message_id) DO UPDATE SET content = excluded.content",
     )
     .bind(chat_id)
     .bind(tg_message_id)
     .bind(role)
+    .bind(from)
     .bind(content)
     .execute(&mut *conn)
     .await?;
@@ -60,12 +62,14 @@ where
 
     // 2. Выбираем только новые сообщения (после последнего саммари)
     let messages = sqlx::query_as::<_, ChatMessage>(
-        "SELECT role, content FROM messages WHERE chat_id = ? AND id > ? ORDER BY id ASC",
+        "SELECT role, user, content FROM messages WHERE chat_id = ? AND id > ? ORDER BY id ASC",
     )
     .bind(chat_id)
     .bind(last_id)
     .fetch_all(&mut *conn)
     .await?;
+
+    //println!("{messages:?}");
 
     Ok(ChatContext { summary, messages })
 }

@@ -17,6 +17,10 @@ pub async fn message_handler(
     let chat_id = msg.chat.id.0;
     let bot_user = bot.get_me().await?;
     let bot_username = bot_user.user.username.as_deref().unwrap_or("bot");
+    let from = match &msg.from {
+        Some(user) => user.username.as_deref().unwrap_or("anonymous"),
+        None => "anonymous",
+    };
 
     // 1. Извлекаем текст
     let text = match msg.text() {
@@ -26,7 +30,7 @@ pub async fn message_handler(
 
     // 2. Сохраняем входящее сообщение в базу (всегда, для контекста)
     let tg_msg_id = msg.id.0 as i64;
-    if let Err(e) = db::upsert_message(&*pool, chat_id, tg_msg_id, Role::User, text).await {
+    if let Err(e) = db::upsert_message(&*pool, chat_id, tg_msg_id, Role::User, from, text).await {
         log::error!("Ошибка сохранения сообщения: {:?}", e);
     }
 
@@ -53,7 +57,7 @@ pub async fn message_handler(
         };
 
         // 5. Запрос к Gemini
-        match gemini.ask(&context.summary, &context.messages).await {
+        match gemini.chat(&context.summary, &context.messages).await {
             Ok(ai_response) => {
                 // 6. Отправляем ответ пользователю
                 let sent_msg = bot
@@ -63,8 +67,15 @@ pub async fn message_handler(
 
                 // 7. Сохраняем ответ бота в базу
                 let bot_msg_id = sent_msg.id.0 as i64;
-                let _ = db::upsert_message(&*pool, chat_id, bot_msg_id, Role::Model, &ai_response)
-                    .await;
+                let _ = db::upsert_message(
+                    &*pool,
+                    chat_id,
+                    bot_msg_id,
+                    Role::Model,
+                    bot_username,
+                    &ai_response,
+                )
+                .await;
             }
             Err(e) => {
                 log::error!("Ошибка Gemini: {:?}", e);

@@ -16,11 +16,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Инициализация БД
     let pool: Arc<SqlitePool> = Arc::new(db::init_db().await?);
 
+    let bot = Bot::from_env();
+
+    let me = bot.get_me().await?;
+    let bot_username = me.user.username.as_deref().unwrap_or("bot");
+
     // Инициализация Gemini
     let gemini_key = env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY missing");
-    let gemini_client = Arc::new(gemini::GeminiClient::new(gemini_key, None));
-
-    let bot = Bot::from_env();
+    let gemini_client = Arc::new(gemini::GeminiClient::new(
+        gemini_key,
+        bot_username.to_string(),
+        None,
+    ));
 
     println!("🤖 Бот запущен!");
 

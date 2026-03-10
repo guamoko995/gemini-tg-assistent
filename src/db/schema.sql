@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS messages (
     chat_id INTEGER NOT NULL,
     tg_message_id INTEGER NOT NULL,
     role TEXT NOT NULL, -- 'user' или 'model'
+    user TEXT NOT NULL,
     content TEXT NOT NULL,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(chat_id) REFERENCES chats(chat_id)

@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
     ));
 
-    println!("🤖 Бот запущен!");
+    //println!("🤖 Бот запущен!");
 
     // Настройка Dispatcher
     let handler = Update::filter_message().endpoint(handler::message_handler);

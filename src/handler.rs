@@ -1,6 +1,6 @@
 use crate::db;
 use crate::gemini::GeminiClient;
-use crate::models::Role;
+use crate::models::ChatMessage;
 
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -15,12 +15,16 @@ pub async fn message_handler(
     gemini: Arc<GeminiClient>,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id.0;
+    let thread_id = match msg.thread_id {
+        Some(thread_id) => thread_id.0.0,
+        None => 0,
+    } as i64;
     let bot_user = bot.get_me().await?;
     let bot_username = bot_user.user.username.as_deref().unwrap_or("bot");
-    let from = match &msg.from {
-        Some(user) => user.username.as_deref().unwrap_or("anonymous"),
-        None => "anonymous",
-    };
+
+    let chat_title = msg.chat.title();
+    // Имя темы вытащить сложнее, пока оставим None или поищем в msg.thread_id
+    let thread_name: Option<&str> = None;
 
     // 1. Извлекаем текст
     let text = match msg.text() {
@@ -29,8 +33,7 @@ pub async fn message_handler(
     };
 
     // 2. Сохраняем входящее сообщение в базу (всегда, для контекста)
-    let tg_msg_id = msg.id.0 as i64;
-    if let Err(e) = db::upsert_message(&*pool, chat_id, tg_msg_id, Role::User, from, text).await {
+    if let Err(e) = db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&msg)).await {
         log::error!("Ошибка сохранения сообщения: {:?}", e);
     }
 
@@ -42,13 +45,13 @@ pub async fn message_handler(
         .map(|u| u.id == bot_user.user.id)
         .unwrap_or(false);
 
-    if is_mentioned || is_reply_to_bot {
+    if is_mentioned || is_reply_to_bot || msg.chat.is_private() {
         // Показываем статус "печатает"
         bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
             .await?;
 
         // 4. Получаем контекст из БД
-        let context = match db::get_chat_context(&*pool, chat_id).await {
+        let context = match db::get_chat_context(&*pool, chat_id, thread_id).await {
             Ok(c) => c,
             Err(e) => {
                 log::error!("Ошибка получения контекста: {:?}", e);
@@ -57,25 +60,20 @@ pub async fn message_handler(
         };
 
         // 5. Запрос к Gemini
-        match gemini.chat(&context.summary, &context.messages).await {
+        match gemini
+            .generate_reply(&context, chat_title, thread_name)
+            .await
+        {
             Ok(ai_response) => {
                 // 6. Отправляем ответ пользователю
-                let sent_msg = bot
+                let msg = bot
                     .send_message(msg.chat.id, &ai_response)
                     .reply_parameters(ReplyParameters::new(msg.id))
                     .await?;
 
                 // 7. Сохраняем ответ бота в базу
-                let bot_msg_id = sent_msg.id.0 as i64;
-                let _ = db::upsert_message(
-                    &*pool,
-                    chat_id,
-                    bot_msg_id,
-                    Role::Model,
-                    bot_username,
-                    &ai_response,
-                )
-                .await;
+                let _ =
+                    db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&msg)).await;
             }
             Err(e) => {
                 log::error!("Ошибка Gemini: {:?}", e);
@@ -86,4 +84,19 @@ pub async fn message_handler(
     }
 
     Ok(())
+}
+
+fn to_chat_message(msg: &Message) -> ChatMessage {
+    ChatMessage {
+        tg_message_id: msg.id.0 as i64,
+        reply_to_id: msg.reply_to_message().map(|m| m.id.0 as i64),
+        user_id: msg.from.clone().map(|u| u.id.0 as i64).unwrap_or(0),
+        user_name: msg
+            .from
+            .as_ref()
+            .and_then(|u| u.username.clone())
+            .unwrap_or("bot".to_string()),
+        content: msg.text().unwrap().to_string(),
+        timestamp: chrono::Utc::now(),
+    }
 }

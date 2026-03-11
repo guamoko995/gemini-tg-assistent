@@ -1,26 +1,23 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Type};
 
-/// Роль участника диалога, совместимая с Gemini API.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Type, PartialEq)]
-#[sqlx(rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    User,
-    Model,
-}
-
-/// Сообщение из истории чата.
+/// Расширенное сообщение со всеми метаданными для контекста
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct ChatMessage {
-    pub role: Role,
-    pub user: String,
+    pub tg_message_id: i64,
+    pub reply_to_id: Option<i64>,
+    pub user_id: i64,
+    pub user_name: String,
     pub content: String,
+    pub timestamp: DateTime<Utc>,
 }
 
-/// Контекст для передачи в ИИ: накопленный итог + свежие сообщения.
+/// Контекст, привязанный к конкретному треду
 #[derive(Debug)]
 pub struct ChatContext {
+    pub chat_id: i64,
+    pub thread_id: i64,
     pub summary: String,
     pub messages: Vec<ChatMessage>,
 }

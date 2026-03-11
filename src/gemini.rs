@@ -1,4 +1,4 @@
-use crate::models::{ChatMessage, Role};
+use crate::models::ChatContext;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,6 @@ struct GeminiRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GeminiContent {
-    role: Option<Role>,
     parts: Vec<GeminiPart>,
 }
 
@@ -45,67 +44,49 @@ impl GeminiClient {
         Self {
             client: Client::new(),
             api_key,
-            model: model.unwrap_or_else(|| "gemini-3-flash-preview".to_string()),
+            model: model.unwrap_or_else(|| "gemini-3.1-flash-lite-preview".to_string()),
             name,
         }
     }
 
     /// Основной метод для получения ответа от ИИ.
     /// Принимает текущее саммари (сжатую память) и историю недавних сообщений.
-    pub async fn chat(
+    pub async fn generate_reply(
         &self,
-        summary: &str,
-        history: &[ChatMessage],
+        context: &ChatContext,
+        chat_title: Option<&str>,
+        thread_name: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.model, self.api_key
         );
 
+        // 1. Формируем динамический системный промпт
+        let system_text = get_system_prompt(&self.name, chat_title, thread_name);
+
         let system_instruction = GeminiContent {
-            role: None,
-            parts: vec![GeminiPart {
-                text: format!(include_str!("gemini/chatter-prompt.md"), self.name),
-            }],
+            parts: vec![GeminiPart { text: system_text }],
         };
 
-        let mut contents: Vec<GeminiContent> = Vec::new();
+        // 2. Форматируем историю сообщений в XML
+        // Используем написанный ранее форматтер format_context_to_xml
+        let history_xml = format_context_to_xml(context);
 
-        // 1. Если есть саммари, добавляем его как вводный контекст от пользователя
-        if !summary.is_empty() {
-            contents.push(GeminiContent {
-                role: Some(Role::User),
-                parts: vec![GeminiPart {
-                    text: format!("Краткое содержание предыдущей части беседы:\n\n {}\n\n Учти это и продолжай диалог.", summary),
-                }],
-            });
-
-            // Добавляем "подтверждение" от модели, чтобы соблюсти чередование User/Model
-            contents.push(GeminiContent {
-                role: Some(Role::Model),
-                parts: vec![GeminiPart {
-                    text: "Да, я помню контекст нашего разговора.".to_string(),
-                }],
-            });
-        }
-
-        // 2. Переносим историю сообщений из базы данных
-        for msg in history {
-            contents.push(GeminiContent {
-                role: Some(msg.role),
-                parts: vec![GeminiPart {
-                    text: format!("{}: {}", msg.user.clone(), msg.content.clone()),
-                }],
-            });
-        }
+        // Передаем всю историю как одно сообщение от пользователя,
+        // которое я должен проанализировать и на которое должен ответить.
+        let contents = vec![GeminiContent {
+            parts: vec![GeminiPart {
+                text: format!("Вот актуальная история переписки:\n\n{}", history_xml),
+            }],
+        }];
 
         let request = GeminiRequest {
             system_instruction,
             contents,
         };
 
-        println!("{request:?}");
-
+        // 3. Отправка запроса
         let response: GeminiResponse = self
             .client
             .post(&url)
@@ -118,7 +99,7 @@ impl GeminiClient {
 
         println!("{response:?}");
 
-        // Извлекаем текст из первого кандидата, проверяя наличие данных
+        // 4. Извлечение ответа
         let text = response
             .candidates
             .as_ref()
@@ -130,4 +111,75 @@ impl GeminiClient {
 
         Ok(text)
     }
+}
+
+pub fn get_system_prompt(
+    bot_username: &str,
+    chat_title: Option<&str>,
+    thread_name: Option<&str>,
+) -> String {
+    let location = match (chat_title, thread_name) {
+        (Some(title), Some(topic)) => format!("в группе \"{}\" внутри темы \"{}\"", title, topic),
+        (Some(title), None) => format!("в группе \"{}\"", title),
+        (None, _) => "в личном диалоге с пользователем".to_string(),
+    };
+
+    format!(
+"Ты — участник беседы {location}. Твой ник: @{bot_username}.
+
+ПРАВИЛА ОБЩЕНИЯ:
+1. Стиль: Лаконичный и неформальный. Пиши как в мессенджерах: коротко, по делу, без лишней вежливости и официоза.
+2. Форматирование: НЕ используй Markdown (никаких звездочек и курсива). Пиши чистым текстом. Избегай сложных списков и заголовков.
+3. Идентичность: Ты — нейросеть, встроенная в Telegram. Не притворяйся человеком, но и не отвечай как сухой робот-помощник. Будь органичной частью беседы.
+4. Контекст: Тебе передается история сообщений в формате XML. Внимательно следи за атрибутами 'author' и 'reply_to', чтобы понимать, кто к кому обращается. Твой ответ — это естественное продолжение беседы в ответ на последнее сообщение.
+
+ФОРМАТ ИСТОРИИ:
+- <summary>: краткое содержание прошлых бесед.
+- <msg>: сообщение. 'id' — его номер, 'reply_to' — на какой id был ответ."
+    )
+}
+
+pub fn format_context_to_xml(ctx: &ChatContext) -> String {
+    let mut xml_ctx = String::new();
+
+    // Добавляем саммари, если оно есть
+    if !ctx.summary.is_empty() {
+        xml_ctx.push_str(&format!("<summary>\n{}\n</summary>\n", ctx.summary));
+    }
+
+    let mut prev_id: Option<i64> = None;
+
+    for msg in &ctx.messages {
+        let time = msg.timestamp.format("%H:%M").to_string();
+
+        // Оптимизация реплая: пишем только если это не ответ на предыдущее сообщение
+        let reply_attr = match msg.reply_to_id {
+            Some(id) if Some(id) != prev_id => format!(" reply_to=\"{}\"", id),
+            _ => String::new(),
+        };
+
+        // Базовая очистка контента, чтобы не ломать XML
+        let sanitized_content = msg.content.replace('<', "&lt;").replace('>', "&gt;");
+
+        xml_ctx.push_str(&format!(
+            "<msg id=\"{}\" time=\"{}\" author=\"{}\" {}>\n{}\n</msg>\n",
+            msg.tg_message_id, time, msg.user_name, reply_attr, sanitized_content
+        ));
+
+        prev_id = Some(msg.tg_message_id);
+    }
+
+    xml_ctx
+}
+
+#[derive(serde::Deserialize)]
+struct GeminiApiError {
+    error: ErrorDetail,
+}
+
+#[derive(serde::Deserialize)]
+struct ErrorDetail {
+    code: u16,
+    message: String,
+    status: String,
 }

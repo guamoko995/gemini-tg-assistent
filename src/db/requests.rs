@@ -25,21 +25,22 @@ where
     sqlx::query(
         r#"
         INSERT INTO messages (
-            chat_id, thread_id, tg_message_id, reply_to_id, user_id, user_name, content, timestamp
+            chat_id, thread_id, message_id, reply_to_id, user_id, user_name, content, quote, timestamp
         ) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id, tg_message_id) DO UPDATE SET 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chat_id, message_id) DO UPDATE SET 
             content = excluded.content,
             user_name = excluded.user_name
         "#,
     )
     .bind(chat_id)
     .bind(thread_id)
-    .bind(msg.tg_message_id)
+    .bind(msg.message_id)
     .bind(msg.reply_to_id)
     .bind(msg.user_id)
     .bind(&msg.user_name)
     .bind(&msg.content)
+    .bind(&msg.quote)
     .bind(msg.timestamp) // sqlx сам поймет, как это положить в DATETIME
     .execute(&mut *conn)
     .await?;
@@ -59,43 +60,35 @@ where
     let mut conn = conn.acquire().await?;
 
     // 1. Получаем саммари и точку отсечки для конкретного треда
-    let thread_row = sqlx::query(
-        "SELECT summary, last_summarized_id FROM threads WHERE chat_id = ? AND thread_id = ?",
-    )
-    .bind(chat_id)
-    .bind(thread_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let thread_row = sqlx::query("SELECT summary FROM threads WHERE chat_id = ? AND thread_id = ?")
+        .bind(chat_id)
+        .bind(thread_id)
+        .fetch_optional(&mut *conn)
+        .await?;
 
-    let (summary, last_id) = match thread_row {
-        Some(row) => (
-            row.get::<Option<String>, _>("summary").unwrap_or_default(),
-            row.get::<i64, _>("last_summarized_id"),
-        ),
-        None => (String::new(), 0i64),
+    let summary = match thread_row {
+        Some(row) => {
+            let a = row.get::<Option<String>, _>("summary").unwrap_or_default();
+            a
+        }
+        None => String::new(),
     };
 
     // 2. Выбираем сообщения только из этого треда, которые еще не попали в саммари
     let messages = sqlx::query_as::<_, ChatMessage>(
         r#"
-        SELECT tg_message_id, reply_to_id, user_id, user_name, content, timestamp 
+        SELECT message_id, reply_to_id, user_id, user_name, content, quote, timestamp 
         FROM messages 
-        WHERE chat_id = ? AND thread_id = ? AND id > ? 
-        ORDER BY id ASC
+        WHERE chat_id = ? AND thread_id = ? 
+        ORDER BY message_id ASC
         "#,
     )
     .bind(chat_id)
     .bind(thread_id)
-    .bind(last_id)
     .fetch_all(&mut *conn)
     .await?;
 
-    Ok(ChatContext {
-        chat_id,
-        thread_id,
-        summary,
-        messages,
-    })
+    Ok(ChatContext { summary, messages })
 }
 
 pub async fn archive_thread_messages<'a, A>(

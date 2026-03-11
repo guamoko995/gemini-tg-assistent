@@ -88,7 +88,7 @@ pub async fn message_handler(
 
 fn to_chat_message(msg: &Message) -> ChatMessage {
     ChatMessage {
-        tg_message_id: msg.id.0 as i64,
+        message_id: msg.id.0 as i64,
         reply_to_id: msg.reply_to_message().map(|m| m.id.0 as i64),
         user_id: msg.from.clone().map(|u| u.id.0 as i64).unwrap_or(0),
         user_name: msg
@@ -97,6 +97,7 @@ fn to_chat_message(msg: &Message) -> ChatMessage {
             .and_then(|u| u.username.clone())
             .unwrap_or("bot".to_string()),
         content: msg.text().unwrap().to_string(),
+        quote: msg.quote().map(|q| q.text.to_string()),
         timestamp: chrono::Utc::now(),
     }
 }

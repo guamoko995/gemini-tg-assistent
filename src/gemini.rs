@@ -127,7 +127,7 @@ pub fn get_system_prompt(
     format!(
 "Ты — участник беседы {location}. Твой ник: @{bot_username}.
 
-ПРАВИЛА ОБЩЕНИЯ:
+ПРАВИЛА ОБЩЕНИЯ В ЛЮБОМ ЧАТЕ:
 1. Стиль: Лаконичный и неформальный. Пиши как в мессенджерах: коротко, по делу, без лишней вежливости и официоза.
 2. Форматирование: НЕ используй Markdown (никаких звездочек и курсива). Пиши чистым текстом. Избегай сложных списков и заголовков.
 3. Идентичность: Ты — нейросеть, встроенная в Telegram. Не притворяйся человеком, но и не отвечай как сухой робот-помощник. Будь органичной частью беседы.
@@ -135,14 +135,17 @@ pub fn get_system_prompt(
 
 ФОРМАТ ИСТОРИИ:
 - <summary>: краткое содержание прошлых бесед.
-- <msg>: сообщение. 'id' — его номер, 'reply_to' — на какой id был ответ."
+- <msg>: сообщение. 'id' — его номер, 'reply_to' — на какой id был ответ.
+
+ПОДСКАЗКИ:
+- если ты участник беседы в группе и хочешь обратиться к пользователю явно, поставь @ перед его ником, чтобы он точно не пропустил твоё сообщение.
+- идентификаторы, используемые в формате истории, другим пользователям не видны, они обрабатываются клиентскими приложениями и даны тебе для удобства отслеживания ответов. В большенстве случаев не стоит о них писать."
     )
 }
 
 pub fn format_context_to_xml(ctx: &ChatContext) -> String {
     let mut xml_ctx = String::new();
 
-    // Добавляем саммари, если оно есть
     if !ctx.summary.is_empty() {
         xml_ctx.push_str(&format!("<summary>\n{}\n</summary>\n", ctx.summary));
     }
@@ -152,34 +155,30 @@ pub fn format_context_to_xml(ctx: &ChatContext) -> String {
     for msg in &ctx.messages {
         let time = msg.timestamp.format("%H:%M").to_string();
 
-        // Оптимизация реплая: пишем только если это не ответ на предыдущее сообщение
         let reply_attr = match msg.reply_to_id {
             Some(id) if Some(id) != prev_id => format!(" reply_to=\"{}\"", id),
             _ => String::new(),
         };
 
-        // Базовая очистка контента, чтобы не ломать XML
         let sanitized_content = msg.content.replace('<', "&lt;").replace('>', "&gt;");
 
-        xml_ctx.push_str(&format!(
-            "<msg id=\"{}\" time=\"{}\" author=\"{}\" {}>\n{}\n</msg>\n",
-            msg.tg_message_id, time, msg.user_name, reply_attr, sanitized_content
-        ));
+        let mut msg_xml = format!(
+            "<msg id=\"{}\" time=\"{}\" author=\"{}\" {}>",
+            msg.message_id, time, msg.user_name, reply_attr
+        );
 
-        prev_id = Some(msg.tg_message_id);
+        if let Some(ref quote) = msg.quote {
+            msg_xml.push_str(&format!(
+                "\n<quote>{}</quote>",
+                quote.replace('<', "&lt;").replace('>', "&gt;")
+            ));
+        }
+
+        msg_xml.push_str(&format!("\n{}\n</msg>\n", sanitized_content));
+        xml_ctx.push_str(&msg_xml);
+
+        prev_id = Some(msg.message_id);
     }
 
     xml_ctx
-}
-
-#[derive(serde::Deserialize)]
-struct GeminiApiError {
-    error: ErrorDetail,
-}
-
-#[derive(serde::Deserialize)]
-struct ErrorDetail {
-    code: u16,
-    message: String,
-    status: String,
 }

@@ -159,7 +159,7 @@ pub fn format_context_to_xml(ctx: &ChatContext) -> String {
     let mut prev_id: Option<i64> = None;
 
     for msg in &ctx.messages {
-        let time = msg.timestamp.format("%H:%M").to_string();
+        let time = msg.timestamp.format("%d.%m.%Y %H:%M %Z").to_string();
 
         let reply_attr = match msg.reply_to_id {
             Some(id) if Some(id) != prev_id => format!(" reply_to=\"{}\"", id),
@@ -193,5 +193,6 @@ pub fn format_context_to_xml(ctx: &ChatContext) -> String {
         prev_id = Some(msg.message_id);
     }
 
+    print!("{xml_ctx}");
     xml_ctx
 }

@@ -7,10 +7,11 @@ use sqlx::FromRow;
 pub struct ChatMessage {
     pub message_id: i64,
     pub reply_to_id: Option<i64>,
-    pub quote: Option<String>,
     pub user_id: i64,
     pub user_name: String,
     pub content: String,
+    pub quote: Option<String>,
+    pub forward_from: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 

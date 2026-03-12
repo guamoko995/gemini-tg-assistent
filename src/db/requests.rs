@@ -7,30 +7,28 @@ pub async fn upsert_message<'a, A>(
     conn: A,
     chat_id: i64,
     thread_id: i64,
-    msg: &ChatMessage, // Передаем ссылку на нашу новую сущность
+    msg: &ChatMessage,
 ) -> Result<(), sqlx::Error>
 where
     A: Acquire<'a, Database = Sqlite>,
 {
     let mut conn = conn.acquire().await?;
 
-    // Гарантируем наличие записи в таблице тредов
     sqlx::query("INSERT INTO threads (chat_id, thread_id) VALUES (?, ?) ON CONFLICT DO NOTHING")
         .bind(chat_id)
         .bind(thread_id)
         .execute(&mut *conn)
         .await?;
 
-    // Вставляем или обновляем сообщение, используя поля из ChatMessage
     sqlx::query(
         r#"
         INSERT INTO messages (
-            chat_id, thread_id, message_id, reply_to_id, user_id, user_name, content, quote, timestamp
+            chat_id, thread_id, message_id, reply_to_id, user_id, user_name, content, quote, timestamp,
+            forward_from
         ) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(chat_id, message_id) DO UPDATE SET 
-            content = excluded.content,
-            user_name = excluded.user_name
+            content = excluded.content
         "#,
     )
     .bind(chat_id)
@@ -41,7 +39,8 @@ where
     .bind(&msg.user_name)
     .bind(&msg.content)
     .bind(&msg.quote)
-    .bind(msg.timestamp) // sqlx сам поймет, как это положить в DATETIME
+    .bind(msg.timestamp)
+    .bind(&msg.forward_from)
     .execute(&mut *conn)
     .await?;
 
@@ -77,7 +76,7 @@ where
     // 2. Выбираем сообщения только из этого треда, которые еще не попали в саммари
     let messages = sqlx::query_as::<_, ChatMessage>(
         r#"
-        SELECT message_id, reply_to_id, user_id, user_name, content, quote, timestamp 
+        SELECT message_id, reply_to_id, user_id, user_name, content, quote, timestamp, forward_from 
         FROM messages 
         WHERE chat_id = ? AND thread_id = ? 
         ORDER BY message_id ASC

@@ -4,8 +4,9 @@ use crate::models::ChatMessage;
 
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::*;
-use teloxide::types::ReplyParameters;
+use teloxide::types::{MessageOrigin, ReplyParameters};
 
 /// Основной обработчик входящих сообщений
 pub async fn message_handler(
@@ -66,14 +67,21 @@ pub async fn message_handler(
         {
             Ok(ai_response) => {
                 // 6. Отправляем ответ пользователю
-                let msg = bot
-                    .send_message(msg.chat.id, &ai_response)
-                    .reply_parameters(ReplyParameters::new(msg.id))
-                    .await?;
+                let mut resp_msg = bot.send_message(msg.chat.id, &ai_response);
+
+                if !msg.chat.is_private() {
+                    resp_msg = resp_msg.reply_parameters(ReplyParameters::new(msg.id))
+                };
+
+                if let Some(thread_id) = msg.thread_id {
+                    resp_msg = resp_msg.message_thread_id(thread_id)
+                };
+
+                let resp_msg = resp_msg.await?;
 
                 // 7. Сохраняем ответ бота в базу
-                let _ =
-                    db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&msg)).await;
+                let _ = db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&resp_msg))
+                    .await;
             }
             Err(e) => {
                 log::error!("Ошибка Gemini: {:?}", e);
@@ -98,6 +106,20 @@ fn to_chat_message(msg: &Message) -> ChatMessage {
             .unwrap_or("bot".to_string()),
         content: msg.text().unwrap().to_string(),
         quote: msg.quote().map(|q| q.text.to_string()),
+        forward_from: get_forward_name(msg.forward_origin()),
         timestamp: chrono::Utc::now(),
     }
+}
+
+pub fn get_forward_name(origin: Option<&MessageOrigin>) -> Option<String> {
+    origin.map(|o| match o {
+        MessageOrigin::User { sender_user, .. } => sender_user.first_name.clone(),
+        MessageOrigin::HiddenUser {
+            sender_user_name, ..
+        } => sender_user_name.clone(),
+        MessageOrigin::Chat { sender_chat, .. } => {
+            sender_chat.title().unwrap_or("unknown").to_string()
+        }
+        MessageOrigin::Channel { chat, .. } => chat.title().unwrap_or("unknown").to_string(),
+    })
 }

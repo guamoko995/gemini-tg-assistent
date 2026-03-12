@@ -9,3 +9,6 @@
 ## Security and Administration
 - Access control: implement a whitelist system or an admin chat to manage users.
 - Basic authentication: verify sender ID before processing requests.
+
+## Error Handling
+- API Reliability: implement robust error handling for Gemini API responses to manage timeouts, rate limits, and model errors gracefully.

@@ -1,6 +1,6 @@
 use crate::db;
 use crate::gemini::GeminiClient;
-use crate::models::ChatMessage;
+use crate::models::{ChatContext, ChatMessage};
 
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -34,9 +34,13 @@ pub async fn message_handler(
     };
 
     // 2. Сохраняем входящее сообщение в базу (всегда, для контекста)
-    if let Err(e) = db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&msg)).await {
-        log::error!("Ошибка сохранения сообщения: {:?}", e);
-    }
+    let count = match db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&msg)).await {
+        Ok(count) => count,
+        Err(err) => {
+            log::error!("Ошибка сохранения сообщения: {:?}", err);
+            0
+        }
+    };
 
     // 3. Проверяем, нужно ли отвечать (тег бота или ответ на его сообщение)
     let is_mentioned = text.contains(&format!("@{}", bot_username));
@@ -46,11 +50,10 @@ pub async fn message_handler(
         .map(|u| u.id == bot_user.user.id)
         .unwrap_or(false);
 
-    if is_mentioned || is_reply_to_bot || msg.chat.is_private() {
-        // Показываем статус "печатает"
-        bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
-            .await?;
+    let need_response = is_mentioned || is_reply_to_bot || msg.chat.is_private();
+    let need_sammory = count >= 100;
 
+    if need_response || need_sammory {
         // 4. Получаем контекст из БД
         let context = match db::get_chat_context(&*pool, chat_id, thread_id).await {
             Ok(c) => c,
@@ -60,38 +63,63 @@ pub async fn message_handler(
             }
         };
 
-        // 5. Запрос к Gemini
-        match gemini
-            .generate_reply(&context, chat_title, thread_name)
-            .await
-        {
-            Ok(ai_response) => {
-                // 6. Отправляем ответ пользователю
-                let mut resp_msg = bot.send_message(msg.chat.id, &ai_response);
+        if need_response {
+            // Показываем статус "печатает"
+            bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
+                .await?;
 
-                if !msg.chat.is_private() {
-                    resp_msg = resp_msg.reply_parameters(ReplyParameters::new(msg.id))
-                };
+            // 5. Запрос к Gemini
+            match gemini
+                .generate_reply(&context, chat_title, thread_name)
+                .await
+            {
+                Ok(ai_response) => {
+                    // 6. Отправляем ответ пользователю
+                    let resp_msg = send_bot_reply(&bot, &msg, &ai_response).await?;
 
-                if let Some(thread_id) = msg.thread_id {
-                    resp_msg = resp_msg.message_thread_id(thread_id)
-                };
-
-                let resp_msg = resp_msg.await?;
-
-                // 7. Сохраняем ответ бота в базу
-                let _ = db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&resp_msg))
-                    .await;
+                    // 7. Сохраняем ответ бота в базу
+                    let _ =
+                        db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&resp_msg))
+                            .await;
+                }
+                Err(e) => {
+                    log::error!("Ошибка Gemini: {:?}", e);
+                    bot.send_message(msg.chat.id, "Извини, я временно не могу сообразить...")
+                        .await?;
+                }
             }
-            Err(e) => {
-                log::error!("Ошибка Gemini: {:?}", e);
-                bot.send_message(msg.chat.id, "Извини, я временно не могу сообразить...")
-                    .await?;
+        }
+
+        if need_sammory {
+            // 8. Архивируем контекст
+            if let Err(e) =
+                check_and_summarize(pool.clone(), gemini.clone(), chat_id, thread_id, &context)
+                    .await
+            {
+                log::error!("Ошибка фоновой архивации: {:?}", e);
             }
         }
     }
 
     Ok(())
+}
+
+pub async fn send_bot_reply(
+    bot: &Bot,
+    original_msg: &Message,
+    text: &str,
+) -> ResponseResult<Message> {
+    let mut resp = bot.send_message(original_msg.chat.id, text);
+
+    if !original_msg.chat.is_private() {
+        resp = resp.reply_parameters(ReplyParameters::new(original_msg.id));
+    }
+
+    if let Some(thread_id) = original_msg.thread_id {
+        resp = resp.message_thread_id(thread_id);
+    }
+
+    resp.await
 }
 
 fn to_chat_message(msg: &Message) -> ChatMessage {
@@ -122,4 +150,25 @@ pub fn get_forward_name(origin: Option<&MessageOrigin>) -> Option<String> {
         }
         MessageOrigin::Channel { chat, .. } => chat.title().unwrap_or("unknown").to_string(),
     })
+}
+
+async fn check_and_summarize(
+    pool: Arc<SqlitePool>,
+    gemini: Arc<GeminiClient>,
+    chat_id: i64,
+    thread_id: i64,
+    context: &ChatContext,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if context.messages.len() <= 100 {
+        return Ok(());
+    }
+
+    match gemini.generate_summary(context).await {
+        Ok((new_summary, last_id)) => {
+            db::archive_thread_messages(&*pool, chat_id, thread_id, &new_summary, last_id).await?;
+        }
+        Err(e) => log::error!("Ошибка суммаризации: {:?}", e),
+    }
+
+    Ok(())
 }

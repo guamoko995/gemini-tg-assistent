@@ -49,44 +49,29 @@ impl GeminiClient {
         }
     }
 
-    /// Основной метод для получения ответа от ИИ.
-    /// Принимает текущее саммари (сжатую память) и историю недавних сообщений.
-    pub async fn generate_reply(
+    async fn call_gemini_api(
         &self,
-        context: &ChatContext,
-        chat_title: Option<&str>,
-        thread_name: Option<&str>,
+        system_instruction_text: String,
+        user_content_text: String,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.model, self.api_key
         );
 
-        // 1. Формируем динамический системный промпт
-        let system_text = get_system_prompt(&self.name, chat_title, thread_name);
-
-        let system_instruction = GeminiContent {
-            parts: vec![GeminiPart { text: system_text }],
-        };
-
-        // 2. Форматируем историю сообщений в XML
-        // Используем написанный ранее форматтер format_context_to_xml
-        let history_xml = format_context_to_xml(context);
-
-        // Передаем всю историю как одно сообщение от пользователя,
-        // которое я должен проанализировать и на которое должен ответить.
-        let contents = vec![GeminiContent {
-            parts: vec![GeminiPart {
-                text: format!("Вот актуальная история переписки:\n\n{}", history_xml),
-            }],
-        }];
-
         let request = GeminiRequest {
-            system_instruction,
-            contents,
+            system_instruction: GeminiContent {
+                parts: vec![GeminiPart {
+                    text: system_instruction_text,
+                }],
+            },
+            contents: vec![GeminiContent {
+                parts: vec![GeminiPart {
+                    text: user_content_text,
+                }],
+            }],
         };
 
-        // 3. Отправка запроса
         let response: GeminiResponse = self
             .client
             .post(&url)
@@ -97,23 +82,54 @@ impl GeminiClient {
             .json()
             .await?;
 
-        println!("{response:?}");
-
-        // 4. Извлечение ответа
-        let text = response
+        response
             .candidates
-            .as_ref()
-            .and_then(|c| c.get(0))
-            .map(|c| &c.content.parts)
-            .and_then(|p| p.get(0))
-            .map(|p| p.text.clone())
-            .ok_or("Не удалось получить текстовый ответ от Gemini API")?;
+            .and_then(|c| c.into_iter().next())
+            .and_then(|c| c.content.parts.into_iter().next())
+            .map(|p| p.text)
+            .ok_or_else(|| "Не удалось получить ответ от API".into())
+    }
 
-        Ok(text)
+    pub async fn generate_reply(
+        &self,
+        context: &ChatContext,
+        chat_title: Option<&str>,
+        thread_name: Option<&str>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let system_prompt = reply_prompt(&self.name, chat_title, thread_name);
+        let ctx_xml = format_context_to_xml(context);
+
+        self.call_gemini_api(system_prompt, ctx_xml).await
+    }
+
+    pub async fn generate_summary(
+        &self,
+        context: &ChatContext,
+    ) -> Result<(String, i64), Box<dyn std::error::Error + Send + Sync>> {
+        let msg_count = context.messages.len();
+        if msg_count <= 100 {
+            return Err("Недостаточно сообщений для архивации".into());
+        }
+
+        let split_idx = msg_count - 50;
+        let (to_summarize, _) = context.messages.split_at(split_idx);
+        let last_id = to_summarize.last().unwrap().message_id;
+
+        let system_prompt = summary_prompt();
+
+        // Формируем контент: старое саммари + срез сообщений
+        let ctx_xml = format_context_to_xml(&ChatContext {
+            summary: context.summary.clone(),
+            messages: to_summarize.to_vec(),
+        });
+
+        let new_summary = self.call_gemini_api(system_prompt, ctx_xml).await?;
+
+        Ok((new_summary, last_id))
     }
 }
 
-pub fn get_system_prompt(
+pub fn reply_prompt(
     bot_username: &str,
     chat_title: Option<&str>,
     thread_name: Option<&str>,
@@ -193,6 +209,26 @@ pub fn format_context_to_xml(ctx: &ChatContext) -> String {
         prev_id = Some(msg.message_id);
     }
 
-    print!("{xml_ctx}");
+    //print!("{xml_ctx}");
     xml_ctx
+}
+
+pub fn summary_prompt() -> String {
+    format!(
+"Ты — ассистент, помогающий боту поддерживать актуальный контекст беседы. Твоя задача — обновлять историю (summary) чата на основе новых сообщений.
+
+ПРАВИЛА:
+1. Анализируй текущее summary и массив новых сообщений.
+2. Объедини их в одно обновленное summary, которое станет опорным для будущих ответов бота.
+3. Сохраняй ключевые детали: о чем договорились, какие вопросы обсуждали, важные имена или факты.
+4. Будь максимально краток. Не пиши \"в чате обсудили\", просто фиксируй суть.
+5. Формат: чистый текст без Markdown, без списков, без лишней вежливости.
+6. Если в новых сообщениях ничего важного нет, просто верни текущее summary без изменений.
+
+ВХОДНЫЕ ДАННЫЕ:
+- Предыдущее summary: текущее состояние контекста.
+- Новые сообщения: массив в формате JSON/XML (атрибуты author, content, quote, reply_to).
+
+Твоя цель — обеспечить плавный переход между удаляемой частью истории и сохраняемым контекстом."
+    )
 }

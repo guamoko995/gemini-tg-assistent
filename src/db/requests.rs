@@ -8,7 +8,7 @@ pub async fn upsert_message<'a, A>(
     chat_id: i64,
     thread_id: i64,
     msg: &ChatMessage,
-) -> Result<(), sqlx::Error>
+) -> Result<i64, sqlx::Error>
 where
     A: Acquire<'a, Database = Sqlite>,
 {
@@ -44,7 +44,14 @@ where
     .execute(&mut *conn)
     .await?;
 
-    Ok(())
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = ? AND thread_id = ?")
+            .bind(chat_id)
+            .bind(thread_id)
+            .fetch_one(&mut *conn)
+            .await?;
+
+    Ok(count)
 }
 
 /// Собирает текущее саммари и все сообщения, которые еще не были в него включены.
@@ -80,6 +87,7 @@ where
         FROM messages 
         WHERE chat_id = ? AND thread_id = ? 
         ORDER BY message_id ASC
+        LIMIT 200
         "#,
     )
     .bind(chat_id)
@@ -101,24 +109,17 @@ where
     A: Acquire<'a, Database = Sqlite>,
 {
     let mut conn = conn.acquire().await?;
-    // Начинаем транзакцию, чтобы всё прошло атомарно
     let mut tx = conn.begin().await?;
 
-    // 1. Обновляем саммари в таблице threads
-    sqlx::query(
-        "UPDATE threads SET summary = ?, last_summarized_id = ? \
-         WHERE chat_id = ? AND thread_id = ?",
-    )
-    .bind(new_summary)
-    .bind(last_id)
-    .bind(chat_id)
-    .bind(thread_id)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("UPDATE threads SET summary = ? WHERE chat_id = ? AND thread_id = ?")
+        .bind(new_summary)
+        .bind(chat_id)
+        .bind(thread_id)
+        .execute(&mut *tx)
+        .await?;
 
-    // 2. Удаляем сообщения, которые теперь "внутри" саммари
     let result =
-        sqlx::query("DELETE FROM messages WHERE chat_id = ? AND thread_id = ? AND id <= ?")
+        sqlx::query("DELETE FROM messages WHERE chat_id = ? AND thread_id = ? AND message_id <= ?")
             .bind(chat_id)
             .bind(thread_id)
             .bind(last_id)
@@ -126,8 +127,6 @@ where
             .await?;
 
     let rows_deleted = result.rows_affected();
-
-    // Фиксируем изменения
     tx.commit().await?;
 
     Ok(rows_deleted)

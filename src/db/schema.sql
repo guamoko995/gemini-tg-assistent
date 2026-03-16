@@ -1,8 +1,14 @@
+CREATE TABLE IF NOT EXISTS chats (
+    chat_id INTEGER PRIMARY KEY,
+    is_active BOOLEAN NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS threads (
     chat_id INTEGER NOT NULL,
     thread_id INTEGER NOT NULL DEFAULT 0, -- 0 для основного чата или лички
     summary TEXT DEFAULT '',
     PRIMARY KEY (chat_id, thread_id)
+    FOREIGN KEY(chat_id) REFERENCES chats(chat_id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (

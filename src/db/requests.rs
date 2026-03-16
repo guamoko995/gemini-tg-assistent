@@ -131,3 +131,34 @@ where
 
     Ok(rows_deleted)
 }
+
+pub async fn chat_is_active<'a, A>(conn: A, chat_id: i64) -> Result<Option<bool>, sqlx::Error>
+where
+    A: Acquire<'a, Database = Sqlite>,
+{
+    let mut conn = conn.acquire().await?;
+    let chat_status: Option<bool> =
+        sqlx::query_scalar("SELECT is_active FROM chats WHERE chat_id = ?")
+            .bind(chat_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(chat_status)
+}
+
+pub async fn set_chat_status<'a, A>(
+    conn: A,
+    chat_id: i64,
+    is_active: bool,
+) -> Result<(), sqlx::Error>
+where
+    A: Acquire<'a, Database = Sqlite>,
+{
+    let mut conn = conn.acquire().await?;
+    sqlx::query("INSERT INTO chats (chat_id, is_active) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET is_active = ?")
+                .bind(chat_id)
+                .bind(is_active)
+                .bind(is_active)
+                .execute(&mut *conn)
+                .await?;
+    Ok(())
+}

@@ -1,4 +1,4 @@
-use crate::db;
+use crate::db::{self, chat_is_active, set_chat_status};
 use crate::gemini::GeminiClient;
 use crate::models::{ChatContext, ChatMessage};
 
@@ -6,7 +6,7 @@ use sqlx::SqlitePool;
 use std::sync::Arc;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::*;
-use teloxide::types::{MessageOrigin, ReplyParameters};
+use teloxide::types::{MessageOrigin, ParseMode, ReplyParameters};
 
 /// Основной обработчик входящих сообщений
 pub async fn message_handler(
@@ -14,24 +14,88 @@ pub async fn message_handler(
     msg: Message,
     pool: Arc<SqlitePool>,
     gemini: Arc<GeminiClient>,
+    bot_username: String,
+    bot_user_id: u64,
+    admin: i64,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id.0;
     let thread_id = match msg.thread_id {
         Some(thread_id) => thread_id.0.0,
         None => 0,
     } as i64;
-    let bot_user = bot.get_me().await?;
-    let bot_username = bot_user.user.username.as_deref().unwrap_or("bot");
-
-    let chat_title = msg.chat.title();
-    // Имя темы вытащить сложнее, пока оставим None или поищем в msg.thread_id
-    let thread_name: Option<&str> = None;
 
     // 1. Извлекаем текст
     let text = match msg.text() {
         Some(t) => t,
         None => return Ok(()), // Игнорируем стикеры/фото для минимализма
     };
+
+    // 3. Проверяем, нужно ли отвечать (тег бота или ответ на его сообщение)
+    let is_mentioned = text.contains(&format!("@{}", bot_username));
+    let is_reply_to_bot = msg
+        .reply_to_message()
+        .and_then(|m| m.from.clone())
+        .map(|u| u.id.0 == bot_user_id)
+        .unwrap_or(false);
+
+    let need_response = is_mentioned || is_reply_to_bot || msg.chat.is_private();
+
+    let is_active = match chat_is_active(&*pool, chat_id).await {
+        Ok(is_active) => is_active,
+        Err(err) => {
+            log::error!("failed to get chat active statuse: {:?}", err);
+            return Ok(());
+        }
+    };
+
+    match is_active {
+        Some(is_active) => {
+            let autor_id = msg.from.clone().map(|u| u.id.0 as i64).unwrap_or(0);
+            if !is_active {
+                if need_response && autor_id == admin {
+                    if let Err(err) = set_chat_status(&*pool, chat_id, true).await {
+                        log::error!("failed to activate chat: {:?}", err);
+                        return Ok(());
+                    }
+                } else {
+                    return Ok(());
+                }
+            }
+        }
+        None => {
+            if need_response {
+                let autor_id = msg.from.clone().map(|u| u.id.0 as i64).unwrap_or(0);
+                if autor_id == admin {
+                    if let Err(err) = set_chat_status(&*pool, chat_id, true).await {
+                        log::error!("failed to activate chat: {:?}", err);
+                        return Ok(());
+                    }
+                } else {
+                    if let Err(err) = set_chat_status(&*pool, chat_id, false).await {
+                        log::error!("failed to activate chat: {:?}", err);
+                        return Ok(());
+                    }
+                    let _ = send_bot_reply(
+                        &bot,
+                        &msg,
+                        &format!(
+                            "Не скажу ни слова без своего [адвоката](tg://user?id={})\\.",
+                            admin
+                        ),
+                        Some(ParseMode::MarkdownV2),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+        }
+    };
+
+    let chat_title = msg.chat.title();
+    // Имя темы вытащить сложнее, пока оставим None или поищем в msg.thread_id
+    let thread_name: Option<&str> = None;
 
     // 2. Сохраняем входящее сообщение в базу (всегда, для контекста)
     let count = match db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&msg)).await {
@@ -42,15 +106,6 @@ pub async fn message_handler(
         }
     };
 
-    // 3. Проверяем, нужно ли отвечать (тег бота или ответ на его сообщение)
-    let is_mentioned = text.contains(&format!("@{}", bot_username));
-    let is_reply_to_bot = msg
-        .reply_to_message()
-        .and_then(|m| m.from.clone())
-        .map(|u| u.id == bot_user.user.id)
-        .unwrap_or(false);
-
-    let need_response = is_mentioned || is_reply_to_bot || msg.chat.is_private();
     let need_sammory = count >= 100;
 
     if need_response || need_sammory {
@@ -75,7 +130,7 @@ pub async fn message_handler(
             {
                 Ok(ai_response) => {
                     // 6. Отправляем ответ пользователю
-                    let resp_msg = send_bot_reply(&bot, &msg, &ai_response).await?;
+                    let resp_msg = send_bot_reply(&bot, &msg, &ai_response, None).await?;
 
                     // 7. Сохраняем ответ бота в базу
                     let _ =
@@ -108,8 +163,13 @@ pub async fn send_bot_reply(
     bot: &Bot,
     original_msg: &Message,
     text: &str,
+    parse_mode: Option<ParseMode>,
 ) -> ResponseResult<Message> {
     let mut resp = bot.send_message(original_msg.chat.id, text);
+
+    if let Some(mode) = parse_mode {
+        resp = resp.parse_mode(mode);
+    }
 
     if !original_msg.chat.is_private() {
         resp = resp.reply_parameters(ReplyParameters::new(original_msg.id));

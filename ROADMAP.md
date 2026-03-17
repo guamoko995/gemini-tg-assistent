@@ -1,14 +1,8 @@
 # Gemini_TG_Assistent roadmap
 
-## Context and Memory
-- Summarization system: periodically condense older messages to save tokens and maintain model focus.
-
-## Content Processing
-- Media parsing: extract text from photo captions and documents so the bot doesn't lose context when files are sent.
-
-## Security and Administration
-- Access control: implement a whitelist system or an admin chat to manage users.
-- Basic authentication: verify sender ID before processing requests.
-
 ## Error Handling
-- API Reliability: implement robust error handling for Gemini API responses to manage timeouts, rate limits, and model errors gracefully.
+- Implement robust error handling for Gemini API responses to manage model errors and general API issues.
+
+## Architecture and Performance
+- Refactor and structure the codebase for better maintainability.
+- Implement in-memory caching for the chat whitelist and blacklist to reduce database load and speed up checks.

@@ -1,19 +1,12 @@
 CREATE TABLE IF NOT EXISTS chats (
-    chat_id INTEGER PRIMARY KEY,
-    is_active BOOLEAN NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS threads (
     chat_id INTEGER NOT NULL,
-    thread_id INTEGER NOT NULL DEFAULT 0, -- 0 для основного чата или лички
     summary TEXT DEFAULT '',
-    PRIMARY KEY (chat_id, thread_id)
-    FOREIGN KEY(chat_id) REFERENCES chats(chat_id)
+    is_active BOOLEAN NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
     chat_id INTEGER NOT NULL,
-    thread_id INTEGER NOT NULL DEFAULT 0,
     message_id INTEGER NOT NULL,
     user_id INTEGER,
     user_name TEXT,
@@ -23,8 +16,8 @@ CREATE TABLE IF NOT EXISTS messages (
     forward_from TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (chat_id, message_id),
-    FOREIGN KEY(chat_id, thread_id) REFERENCES threads(chat_id, thread_id)
+    FOREIGN KEY(chat_id) REFERENCES chats(chat_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(chat_id, thread_id);
+CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_unique_msg ON messages(chat_id, message_id);

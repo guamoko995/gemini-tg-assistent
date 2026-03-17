@@ -19,10 +19,6 @@ pub async fn message_handler(
     admin: i64,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id.0;
-    let thread_id = match msg.thread_id {
-        Some(thread_id) => thread_id.0.0,
-        None => 0,
-    } as i64;
 
     // 1. Извлекаем текст
     let text = match msg.text() {
@@ -98,7 +94,7 @@ pub async fn message_handler(
     let thread_name: Option<&str> = None;
 
     // 2. Сохраняем входящее сообщение в базу (всегда, для контекста)
-    let count = match db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&msg)).await {
+    let count = match db::upsert_message(&*pool, chat_id, &to_chat_message(&msg)).await {
         Ok(count) => count,
         Err(err) => {
             log::error!("Ошибка сохранения сообщения: {:?}", err);
@@ -110,7 +106,7 @@ pub async fn message_handler(
 
     if need_response || need_sammory {
         // 4. Получаем контекст из БД
-        let context = match db::get_chat_context(&*pool, chat_id, thread_id).await {
+        let context = match db::get_chat_context(&*pool, chat_id).await {
             Ok(c) => c,
             Err(e) => {
                 log::error!("Ошибка получения контекста: {:?}", e);
@@ -133,9 +129,7 @@ pub async fn message_handler(
                     let resp_msg = send_bot_reply(&bot, &msg, &ai_response, None).await?;
 
                     // 7. Сохраняем ответ бота в базу
-                    let _ =
-                        db::upsert_message(&*pool, chat_id, thread_id, &to_chat_message(&resp_msg))
-                            .await;
+                    let _ = db::upsert_message(&*pool, chat_id, &to_chat_message(&resp_msg)).await;
                 }
                 Err(e) => {
                     log::error!("Ошибка Gemini: {:?}", e);
@@ -148,8 +142,7 @@ pub async fn message_handler(
         if need_sammory {
             // 8. Архивируем контекст
             if let Err(e) =
-                check_and_summarize(pool.clone(), gemini.clone(), chat_id, thread_id, &context)
-                    .await
+                check_and_summarize(pool.clone(), gemini.clone(), chat_id, &context).await
             {
                 log::error!("Ошибка фоновой архивации: {:?}", e);
             }
@@ -216,7 +209,6 @@ async fn check_and_summarize(
     pool: Arc<SqlitePool>,
     gemini: Arc<GeminiClient>,
     chat_id: i64,
-    thread_id: i64,
     context: &ChatContext,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if context.messages.len() <= 100 {
@@ -225,7 +217,7 @@ async fn check_and_summarize(
 
     match gemini.generate_summary(context).await {
         Ok((new_summary, last_id)) => {
-            db::archive_thread_messages(&*pool, chat_id, thread_id, &new_summary, last_id).await?;
+            db::archive_chat_history(&*pool, chat_id, &new_summary, last_id).await?;
         }
         Err(e) => log::error!("Ошибка суммаризации: {:?}", e),
     }
